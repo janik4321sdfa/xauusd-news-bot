@@ -1,0 +1,23 @@
+# lokalni konfigurace s webhookem - do repa NIKDY (v cloudu se pouziva GitHub secret)
+config.json
+.ghtoken
+
+# lokalni smeti
+logs/
+_bk/
+out.txt
+err.txt
+pip.txt
+probe*.py
+test_*.py
+verify_*.py
+gh_check.py
+_patch*.py
+deploy/
+__pycache__/
+*.pyc
+state.selftest.json
+
+# POZOR: state.json a ff_cache.json jsou zamerne SLEDOVANE (tracked).
+# state.json  = pamet, co uz bylo odeslano (proti duplikatum)
+# ff_cache.json = cache Forex Factory feedu (feed rate-limituje na ~1 dotaz/hod)

@@ -1,0 +1,71 @@
+name: GoldNews Watcher
+
+# Hlida ekonomicke zpravy pro XAUUSD (zlato) a posila je na Discord.
+# Bezi v cloudu GitHubu - nepotrebuje zapnuty pocitac.
+on:
+  schedule:
+    # kazdych 5 minut (nejkratsi interval, ktery GitHub Actions dovoluje)
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Serializace beh po behu. Kriticke: job muze "dospat" az na T-5min pred
+# zpravou, takze se dva behy nesmi prekryt (jinak duplicitni ping).
+concurrency:
+  group: goldnews-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tzdata
+        run: python -m pip install --quiet tzdata
+
+      - name: Run watcher
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GOLDNEWS_ORIGIN: cloud
+          TZ: Europe/Prague
+        run: python goldnews.py --watch
+
+      - name: Persist state and cache
+        if: always()
+        run: |
+          git config user.name "goldnews-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain state.json ff_cache.json)" ]; then
+            git add state.json ff_cache.json
+            git commit -m "chore: state/cache update [skip ci]"
+            for i in 1 2 3; do
+              if git pull --rebase --autostash origin main && git push origin HEAD:main; then
+                echo "state ulozen"
+                exit 0
+              fi
+              echo "push selhal, pokus $i"
+              sleep 5
+            done
+            echo "::warning::stav se nepodarilo ulozit"
+          else
+            echo "zadna zmena stavu"
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+          if-no-files-found: ignore

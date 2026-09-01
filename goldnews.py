@@ -25,6 +25,14 @@ import time
 import urllib.error
 import urllib.request
 
+# Windows konzole/soubor jinak pouzije cp1250 a emoji shodi cely vypis
+# (UnicodeEncodeError). Vynutime UTF-8 nezavisle na prostredi.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ----------------------------------------------------------------------------
 # Timezone: Europe/Prague, s fallbackem bez zavislosti (EU DST pravidla)
 # ----------------------------------------------------------------------------
@@ -762,6 +770,14 @@ def do_selftest():
           {"minutes", "interval"} <= set(inspect.signature(do_loop).parameters))
     check("git_sync je bez GOLDNEWS_GIT_SYNC no-op",
           (os.environ.get("GOLDNEWS_GIT_SYNC") != "1") and (git_sync() is None))
+
+    # 9d vypis emoji nesmi shodit proces ani pri presmerovani do souboru
+    try:
+        print("  [emoji test] " + IMPACT_ICON["High"] + IMPACT_ICON["Medium"]
+              + IMPACT_ICON["Low"])
+        check("emoji lze vypsat (UTF-8 vynuceno)", True)
+    except UnicodeEncodeError as ex:
+        check("emoji lze vypsat (UTF-8 vynuceno)", False, str(ex))
 
     # 10 webhook nastaven
     check("webhook je nakonfigurovan", bool(webhook_url()))

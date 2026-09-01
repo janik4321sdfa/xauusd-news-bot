@@ -515,16 +515,36 @@ def gold_view(e):
     }
 
 
-def _card(e, show_time=True):
-    """(nazev, hodnota) pro jednu zpravu jako Discord field."""
+def _card(e, show_time=True, past=False):
+    """(nazev, hodnota) pro jednu zpravu jako Discord field.
+
+    past=True -> zprava uz vysla. Reakcni pravidlo se vynechava (je bezpredmetne)
+    a cisla se prepnou do minuleho casu, aby to nevypadalo jako predpoved.
+    """
     icon = IMPACT_ICON.get(e["impact"], "")
     v = gold_view(e)
-    body = ([v["numbers"]] if v["numbers"] else []) + v["rule"]
+
+    if past:
+        fc = (e.get("forecast") or "").strip()
+        pv = (e.get("previous") or "").strip()
+        bits = []
+        if fc:
+            bits.append(f"\u010dekalo se {fc}")
+        if pv:
+            bits.append(f"předtím {pv}")
+        body = ["  \u00b7  ".join(bits) if bits else "\u2014"]
+        mark = "\u2714\ufe0f"
+    else:
+        body = ([v["numbers"]] if v["numbers"] else []) + v["rule"]
+        mark = icon
+
     if show_time:
         t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
-        name = f"{icon}  {t}  \u00b7  {e['title']}"
+        name = f"{mark}  {t}  \u00b7  {e['title']}"
     else:
-        name = f"{icon}  {e['title']}"
+        name = f"{mark}  {e['title']}"
+    if past:
+        name += "   (u\u017e vy\u0161lo)"
     return name, "\n".join(body)
 
 
@@ -543,12 +563,35 @@ HINT = ("\u0160ipky plat\u00ed proti **progn\u00f3ze**, ne proti minul\u00e9 hod
         "Trh reaguje na odchylku od progn\u00f3zy.")
 
 
+DNY = ("po", "ut", "st", "ct", "pa", "so", "ne")
+
+
+def _human_wait(mins):
+    """65 -> 'za 1 h 5 min' | 1500 -> 'za 1 d 1 h'"""
+    mins = max(0, int(round(mins)))
+    if mins < 60:
+        return f"za {mins} min"
+    if mins < 24 * 60:
+        return f"za {mins // 60} h {mins % 60} min"
+    d, rest = divmod(mins, 24 * 60)
+    return f"za {d} d {rest // 60} h"
+
+
+def _when_label(e, today):
+    """'16:00' pro dnes, 'st 02.09 14:15' pro jiny den."""
+    d = e["when"].astimezone(LOCAL_TZ)
+    if d.date() == today:
+        return d.strftime("%H:%M")
+    return f"{DNY[d.weekday()]} {d.strftime('%d.%m %H:%M')}"
+
+
 def _sorted_evs(evs):
     return sorted(evs, key=lambda x: (x["when"], x["impact"] != "High", x["title"]))
 
 
-def build_digest_embed(day, evs, source):
+def build_digest_embed(day, evs, source, now=None):
     ds = day.strftime("%d.%m.%Y")
+    now = now or dt.datetime.now(UTC)
     if not evs:
         return {
             "author": {"name": "XAUUSD \u00b7 GOLD"},
@@ -562,11 +605,16 @@ def build_digest_embed(day, evs, source):
     evs = _sorted_evs(evs)
     nh = sum(1 for e in evs if e["impact"] == "High")
     nm = len(evs) - nh
+    npast = sum(1 for e in evs if e["when"] <= now)
     head = []
     if nh:
         head.append(f"{IMPACT_ICON['High']} **{nh}\u00d7 High**")
     if nm:
         head.append(f"{IMPACT_ICON['Medium']} **{nm}\u00d7 Medium**")
+    if npast:
+        head.append("\u00b7  " + ("v\u0161echny u\u017e vy\u0161ly"
+                                   if npast == len(evs)
+                                   else f"{npast} u\u017e vy\u0161lo"))
 
     emb = {
         "author": {"name": "XAUUSD \u00b7 GOLD"},
@@ -580,9 +628,12 @@ def build_digest_embed(day, evs, source):
     if len(evs) <= 20:
         fields = []
         for e in evs:
-            n, v = _card(e)
+            n, v = _card(e, past=e["when"] <= now)
             fields.append({"name": n, "value": v, "inline": False})
-        fields.append({"name": "\u2139\ufe0f", "value": HINT, "inline": False})
+        # vysvetlivka jen kdyz je co vysvetlovat (nejaka zprava jeste nevysla)
+        if npast < len(evs):
+            fields.append({"name": "\u2139\ufe0f  Jak to \u010d\u00edst",
+                           "value": HINT, "inline": False})
         emb["fields"] = fields
     else:
         emb["description"] += "\n\n" + "\n".join(fmt_event_compact(e) for e in evs)
@@ -768,27 +819,44 @@ def do_now(dry=False):
     rel = gold_relevant(events)
     evs = events_for_day(rel, day)
     emb = build_digest_embed(day, evs, source)
-    emb["title"] = "[RUCNI DOTAZ] " + emb["title"]
-    # pridej co jeste dnes zbyva
-    left = [e for e in evs if e["when"] > dt.datetime.now(UTC)]
+    emb["author"] = {"name": "XAUUSD \u00b7 GOLD \u00b7 ru\u010dn\u00ed dotaz"}
+
+    # nejblizsi zprava - napric dny, ne jen dnes (jinak po 16:00 nic nerekne)
+    now_u = dt.datetime.now(UTC)
+    left = sorted([e for e in rel if e["when"] > now_u], key=lambda x: x["when"])
     if left:
         nxt = left[0]
-        mins = (nxt["when"] - dt.datetime.now(UTC)).total_seconds() / 60.0
+        mins = (nxt["when"] - now_u).total_seconds() / 60.0
+        icon = IMPACT_ICON.get(nxt["impact"], "")
+        v = gold_view(nxt)
+        val = [f"{icon} **{_when_label(nxt, day)}**  \u00b7  {nxt['title']}",
+               f"**{_human_wait(mins)}**"]
+        if v["numbers"]:
+            val.append(v["numbers"])
+        val += v["rule"]
         emb.setdefault("fields", []).append({
-            "name": "Nejblizsi zprava",
-            "value": f"{fmt_event_compact(nxt)}\n\u2192 za **{int(mins)} min**",
-        })
+            "name": "\u23ed\ufe0f  Nejbli\u017e\u0161\u00ed zpr\u00e1va",
+            "value": "\n".join(val), "inline": False})
+    else:
+        emb.setdefault("fields", []).append({
+            "name": "\u23ed\ufe0f  Nejbli\u017e\u0161\u00ed zpr\u00e1va",
+            "value": "V na\u010dten\u00e9m kalend\u00e1\u0159i u\u017e "
+                     "\u017e\u00e1dn\u00e1 dal\u0161\u00ed High/Medium "
+                     "zpr\u00e1va nen\u00ed.", "inline": False})
     ok = discord_send(emb, dry=dry)
     print("\n" + "=" * 62)
     print(f"  XAUUSD / GOLD - {day.strftime('%d.%m.%Y')}   (zdroj: {source})")
     print("=" * 62)
     if not evs:
         print("  Zadne High ani Medium impact USD zpravy dnes.")
+    now_u2 = dt.datetime.now(UTC)
     for e in evs:
         t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
         v = gold_view(e)
         fc = (e.get("forecast") or "").strip()
-        if v["kind"] == "RULE":
+        if e["when"] <= now_u2:
+            hint = "UZ VYSLO"
+        elif v["kind"] == "RULE":
             pol = gold_polarity(e["title"])
             hint = (f"pod {fc} = roste / nad {fc} = pada" if pol == "INV"
                     else f"nad {fc} = roste / pod {fc} = pada")
@@ -797,6 +865,11 @@ def do_now(dry=False):
         else:
             hint = "dopad nejasny"
         print(f"  {t}  {e['impact']:<6} {e['title'][:34]:<34}  {hint}")
+    if left:
+        nx = left[0]
+        print("-" * 62)
+        print(f"  DALSI: {_when_label(nx, day)}  {nx['impact']:<6} {nx['title'][:34]}"
+              f"   ({_human_wait((nx['when'] - now_u2).total_seconds() / 60.0)})")
     print("=" * 62)
     print("  Odeslano na Discord: " + ("ANO" if ok else "NE - chyba"))
     print("=" * 62 + "\n")
@@ -1072,6 +1145,57 @@ def do_selftest():
           "55.2" in solo["description"] and "ROSTE" in solo["description"])
 
     check("diakritika prosla do textu", "\u010dek\u00e1 se" in t1, t1[:40])
+
+    # 9k uz vydane zpravy se nesmi tvarit jako predpoved
+    past_ev = _ev("ISM Manufacturing PMI", "55.2", "55.6")
+    past_ev["when"] = dt.datetime.now(UTC) - dt.timedelta(hours=2)
+    fut_ev = _ev("JOLTS Job Openings", "7.33M", "7.36M", "Medium")
+    fut_ev["when"] = dt.datetime.now(UTC) + dt.timedelta(hours=2)
+
+    n_p, v_p = _card(past_ev, past=True)
+    check("minula zprava ma znacku 'uz vyslo'", "vy\u0161lo" in n_p, n_p)
+    check("minula zprava NEMA reakcni pravidlo",
+          "ROSTE" not in v_p and "PAD" not in v_p, v_p)
+    check("minula zprava ma minuly cas", "\u010dekalo se" in v_p, v_p)
+
+    n_f, v_f = _card(fut_ev, past=False)
+    check("budouci zprava MA reakcni pravidlo", "ROSTE" in v_f)
+    check("budouci zprava ma pritomny cas", "\u010dek\u00e1 se" in v_f)
+    check("budouci zprava nema znacku 'uz vyslo'", "vy\u0161lo" not in n_f)
+
+    # digest: mix minulosti a budoucnosti
+    mix = build_digest_embed(dt.date.today(), [past_ev, fut_ev], "T")
+    tm = _alltext(mix)
+    check("digest oznaci, kolik uz vyslo", "u\u017e vy\u0161lo" in tm, tm[:160])
+    check("digest s budoucim eventem ma vysvetlivku",
+          any("Jak to" in f["name"] for f in mix["fields"]))
+
+    allpast = build_digest_embed(dt.date.today(), [past_ev], "T")
+    ta = _alltext(allpast)
+    check("kdyz vsechno vyslo, rekne to", "v\u0161echny u\u017e vy\u0161ly" in ta,
+          (allpast.get("description") or "")[:120])
+    check("kdyz vsechno vyslo, vysvetlivka je zbytecna -> chybi",
+          not any("Jak to" in f["name"] for f in allpast.get("fields", [])))
+    check("vysvetlivka ma nadpis, ne jen emoji",
+          all(len(f["name"].strip()) > 3 for f in mix["fields"]))
+
+    # 9l lidsky cas cekani
+    for m, want in ((0, "za 0 min"), (45, "za 45 min"), (65, "za 1 h 5 min"),
+                    (1500, "za 1 d 1 h")):
+        check(f"_human_wait({m}) = {want}", _human_wait(m) == want, _human_wait(m))
+
+    # 9m popisek casu
+    today_ = dt.datetime.now(LOCAL_TZ).date()
+    e_dnes = _ev("X", "1", "1")
+    e_dnes["when"] = dt.datetime.combine(today_, dt.time(16, 0),
+                                         LOCAL_TZ).astimezone(UTC)
+    check("dnesni zprava = jen cas", _when_label(e_dnes, today_) == "16:00",
+          _when_label(e_dnes, today_))
+    e_jinak = _ev("Y", "1", "1")
+    e_jinak["when"] = (dt.datetime.combine(today_, dt.time(14, 15), LOCAL_TZ)
+                       + dt.timedelta(days=2)).astimezone(UTC)
+    lbl = _when_label(e_jinak, today_)
+    check("jiny den = zkratka dne + datum", len(lbl) > 6 and "14:15" in lbl, lbl)
 
     # 10 webhook nastaven
     check("webhook je nakonfigurovan", bool(webhook_url()))

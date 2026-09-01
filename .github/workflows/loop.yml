@@ -56,11 +56,15 @@ jobs:
             for i in 1 2 3 4 5; do
               ids=$( (gh run list --workflow loop.yml   --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'; \
                       gh run list --workflow loop_b.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId') 2>/dev/null )
-              others=$(echo "$ids" | grep -v "^${mine}$" | grep -c '[0-9]' || true)
-              echo "pokus $i: jine bezici smycky = ${others:-0}"
-              if [ "${others:-0}" -eq 0 ]; then break; fi
+              # Pocitame JEN STARSI behy (mensi run id).
+              # Kdyz startuji dva behy soucasne (token + workflow_run), musi jeden
+              # ustoupit. Rozhoduje ID: starsi vyhrava, novejsi konci. Bez tohoto
+              # by kazdy cekal na druheho a VYPNULY BY SE OBA -> nic nehlida.
+              older=$(echo "$ids" | awk -v m="$mine" 'NF && $1+0 < m+0' | wc -l | tr -d ' ')
+              echo "pokus $i: starsich bezicich smycek = ${older:-0}"
+              if [ "${older:-0}" -eq 0 ]; then break; fi
               if [ "$i" -eq 5 ]; then
-                echo "jina smycka stale bezi -> koncim"
+                echo "starsi smycka stale bezi -> koncim (ona hlida dal)"
                 skip=true
               fi
               sleep 25

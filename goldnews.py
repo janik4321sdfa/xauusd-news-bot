@@ -388,21 +388,48 @@ def build_digest_embed(day, evs, source):
     }
 
 
-def build_ping_embed(e, minutes, source):
-    t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
-    icon = IMPACT_ICON.get(e["impact"], "⚪")
-    fields = []
-    if e.get("forecast"):
-        fields.append({"name": "Prognoza", "value": e["forecast"], "inline": True})
-    if e.get("previous"):
-        fields.append({"name": "Predchozi", "value": e["previous"], "inline": True})
+def build_ping_embed(evs, minutes, source):
+    """evs = seznam eventu se STEJNYM casem -> jedna zprava misto nekolika."""
+    if not isinstance(evs, list):
+        evs = [evs]
+    evs = sorted(evs, key=lambda x: (x["impact"] != "High", x["title"]))
+    when = evs[0]["when"]
+    t = when.astimezone(LOCAL_TZ).strftime("%H:%M")
+    has_high = any(e["impact"] == "High" for e in evs)
+    icon = IMPACT_ICON["High"] if has_high else IMPACT_ICON["Medium"]
     m = max(0, int(round(minutes)))
+
+    if len(evs) == 1:
+        e = evs[0]
+        title = f"{icon} ZA {m} MIN - {e['title']}"
+        desc = (f"**{e['impact']} impact** | `{e['currency']}` | "
+                f"vychazi v **{t}** (Praha)\n"
+                f"Pripravena volatilita na **XAUUSD**.")
+        fields = []
+        if e.get("forecast"):
+            fields.append({"name": "Prognoza", "value": e["forecast"], "inline": True})
+        if e.get("previous"):
+            fields.append({"name": "Predchozi", "value": e["previous"], "inline": True})
+    else:
+        title = f"{icon} ZA {m} MIN - {len(evs)} zpravy v {t}"
+        lines = []
+        for e in evs:
+            bits = []
+            if e.get("forecast"):
+                bits.append(f"prognoza {e['forecast']}")
+            if e.get("previous"):
+                bits.append(f"predchozi {e['previous']}")
+            tail = f"  _( {' | '.join(bits)} )_" if bits else ""
+            lines.append(f"{IMPACT_ICON.get(e['impact'], '')} **{e['impact']}** "
+                         f"`{e['currency']}` {e['title']}{tail}")
+        desc = (f"Vsechny vychazi v **{t}** (Praha).\n"
+                f"Pripravena volatilita na **XAUUSD**.\n\n" + "\n".join(lines))
+        fields = []
+
     return {
-        "title": f"{icon} ZA {m} MIN - {e['title']}",
-        "description": (f"**{e['impact']} impact** | `{e['currency']}` | "
-                        f"vychazi v **{t}** (Praha)\n"
-                        f"Pripravena volatilita na **XAUUSD**."),
-        "color": COLOR_HIGH if e["impact"] == "High" else COLOR_MED,
+        "title": title,
+        "description": desc,
+        "color": COLOR_HIGH if has_high else COLOR_MED,
         "fields": fields,
         "footer": {"text": foot(source)},
     }
@@ -447,34 +474,37 @@ def do_watch(dry=False, allow_sleep=True):
                 st["digest_sent_for"] = today.isoformat()
                 changed = True
 
-    # 2) pingy pred zpravou
+    # 2) pingy pred zpravou - eventy se stejnym casem se sloucí do jedne zpravy
     pinged = set(st.get("pinged", []))
-    upcoming = []
+    now_u = dt.datetime.now(UTC)
+    groups = {}
     for e in rel:
-        mins = (e["when"] - dt.datetime.now(UTC)).total_seconds() / 60.0
         if e["id"] in pinged:
             continue
+        mins = (e["when"] - now_u).total_seconds() / 60.0
         if 0.0 < mins <= PING_WINDOW_MIN:
-            upcoming.append((mins, e))
-    upcoming.sort(key=lambda x: x[0])
+            groups.setdefault(e["when"], []).append(e)
 
-    for mins, e in upcoming:
-        # Presnost: pokud je jeste cas, dospi presne na T-5:00
+    for when in sorted(groups):
+        grp = groups[when]
+        mins = (when - dt.datetime.now(UTC)).total_seconds() / 60.0
+        # presnost: je-li jeste cas, dospi na presne T-PING_LEAD_MIN
         if allow_sleep and mins > PING_LEAD_MIN + 0.25:
             wait = (mins - PING_LEAD_MIN) * 60.0
-            if wait > 0:
-                log(f"Cekam {wait:.0f}s na presny T-{PING_LEAD_MIN}min "
-                    f"pro '{e['title']}'")
-                if not dry:
-                    time.sleep(min(wait, 9 * 60))
-        mins_now = (e["when"] - dt.datetime.now(UTC)).total_seconds() / 60.0
-        if discord_send(build_ping_embed(e, mins_now, source), dry=dry):
-            log(f"PING odeslan: {e['title']} (za {mins_now:.1f} min)")
+            log(f"Cekam {wait:.0f}s na presny T-{PING_LEAD_MIN}min "
+                f"({len(grp)} zpravy v {when.astimezone(LOCAL_TZ):%H:%M})")
             if not dry:
-                pinged.add(e["id"])
+                time.sleep(min(wait, 9 * 60))
+        mins_now = (when - dt.datetime.now(UTC)).total_seconds() / 60.0
+        if discord_send(build_ping_embed(grp, mins_now, source), dry=dry):
+            names = ", ".join(e["title"] for e in grp)
+            log(f"PING odeslan ({len(grp)}x, za {mins_now:.1f} min): {names}")
+            if not dry:
+                for e in grp:
+                    pinged.add(e["id"])
                 changed = True
 
-    if not upcoming:
+    if not groups:
         log("Zadna zprava v okne pro ping")
 
     if changed and not dry:
@@ -586,6 +616,14 @@ def do_selftest():
     check("digest embed ma titulek + popis", bool(de["title"]) and bool(de["description"]))
     check("digest obsahuje nazev eventu", "ISM Manufacturing PMI" in de["description"])
     check("ping embed obsahuje 'ZA 5 MIN'", "ZA 5 MIN" in pe["title"], pe["title"])
+    ev2 = dict(ev, id="z2", title="JOLTS Job Openings", impact="Medium")
+    pg = build_ping_embed([ev, ev2], 5, "T")
+    check("skupinovy ping = 1 zprava pro 2 eventy", "2 zpravy" in pg["title"], pg["title"])
+    check("skupinovy ping obsahuje oba nazvy",
+          "ISM Manufacturing PMI" in pg["description"] and "JOLTS" in pg["description"])
+    check("skupinovy ping ma barvu High (je tam High)", pg["color"] == COLOR_HIGH)
+    check("jednotlivy ping ma nazev eventu v titulku",
+          "ISM Manufacturing PMI" in pe["title"])
     check("prazdny digest je zeleny", build_digest_embed(dt.date(2026, 9, 1), [], "T")["color"] == COLOR_CALM)
     check("embed <= 6000 znaku", len(json.dumps(de)) < 6000)
 

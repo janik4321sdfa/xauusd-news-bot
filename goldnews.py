@@ -82,6 +82,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FF_MIN_CACHE_SEC = 3600          # FF feed rate-limituje -> min. 1h cache
+FF_MAX_STALE_SEC = 20 * 3600     # nad tuto hranici uz FF cache nepovazujeme za spolehlivou
 TV_URL = "https://economic-calendar.tradingview.com/events"
 
 # Meny relevantni pro XAUUSD (zlato se kotuje v USD; "All" = globalni eventy)
@@ -170,7 +171,8 @@ def mk_id(when_utc, title, currency):
 
 
 def fetch_forexfactory():
-    """Weekly FF feed s povinnou cache (feed vraci 429 pri castych dotazech)."""
+    """Weekly FF feed s povinnou cache (feed vraci 429 pri castych dotazech).
+    Vraci (events, age_seconds) - age = jak stara jsou pouzita data."""
     now = time.time()
     cached = None
     if os.path.exists(CACHE_PATH):
@@ -180,22 +182,23 @@ def fetch_forexfactory():
         except Exception:
             cached = None
 
-    fresh_enough = (cached and (now - cached.get("fetched_at", 0)) < FF_MIN_CACHE_SEC
-                    and cached.get("data"))
-    if fresh_enough:
-        age = int(now - cached["fetched_at"])
-        log(f"FF: pouzivam cache ({age}s stara, {len(cached['data'])} eventu)")
+    age = 0.0
+    if cached and (now - cached.get("fetched_at", 0)) < FF_MIN_CACHE_SEC and cached.get("data"):
+        age = now - cached["fetched_at"]
+        log(f"FF: pouzivam cache ({int(age)}s stara, {len(cached['data'])} eventu)")
         raw = cached["data"]
     else:
         try:
             raw = http_json(FF_URL, retries=2, backoff=5)
             with open(CACHE_PATH, "w", encoding="utf-8") as f:
                 json.dump({"fetched_at": now, "data": raw}, f)
+            age = 0.0
             log(f"FF: nacteno online ({len(raw)} eventu), cache aktualizovana")
         except Exception as ex:
             if cached and cached.get("data"):
-                log(f"FF: online selhalo ({ex}) -> stara cache "
-                    f"({int(now - cached.get('fetched_at', 0))}s)")
+                age = now - cached.get("fetched_at", 0)
+                log(f"FF: online selhalo ({type(ex).__name__}) -> stara cache "
+                    f"({age / 3600:.1f}h)")
                 raw = cached["data"]
             else:
                 raise
@@ -221,7 +224,7 @@ def fetch_forexfactory():
             })
         except Exception:
             continue
-    return out
+    return out, age
 
 
 TV_IMPORTANCE = {1: "High", 0: "Medium", -1: "Low"}
@@ -261,16 +264,32 @@ def fetch_tradingview(days_back=1, days_fwd=2):
 
 
 def get_events():
-    """FF primarne, TV jako zaloha. Vraci (events, source_name)."""
+    """FF primarne. Kdyz je FF cache prilis stara (nebo FF uplne padne),
+    prepne se na TradingView. Nikdy neposila tyden stara data jako aktualni."""
+    ff, age = None, None
     try:
-        ev = fetch_forexfactory()
-        if ev:
-            return ev, "ForexFactory"
-        log("FF: prazdny vysledek -> fallback")
+        ff, age = fetch_forexfactory()
     except Exception as ex:
-        log(f"FF: NEDOSTUPNE ({type(ex).__name__}: {ex}) -> fallback TradingView")
-    ev = fetch_tradingview()
-    return ev, "TradingView (zaloha)"
+        log(f"FF: NEDOSTUPNE ({type(ex).__name__}: {ex})")
+
+    if ff and age is not None and age <= FF_MAX_STALE_SEC:
+        return ff, "ForexFactory"
+
+    if ff:
+        log(f"FF: cache je {age / 3600:.1f}h stara (limit {FF_MAX_STALE_SEC / 3600:.0f}h)"
+            f" -> zkousim TradingView")
+    try:
+        tv = fetch_tradingview()
+        if tv:
+            return tv, "TradingView (zaloha)"
+    except Exception as ex:
+        log(f"TV: NEDOSTUPNE ({type(ex).__name__}: {ex})")
+
+    if ff:
+        log("Oba zdroje problematicke -> pouzivam starou FF cache")
+        return ff, f"ForexFactory (cache {age / 3600:.0f}h)"
+
+    raise RuntimeError("zadny zdroj dat neni dostupny")
 
 
 def gold_relevant(events):
@@ -649,10 +668,17 @@ def do_selftest():
     except Exception as ex:
         check("TradingView zdroj zije", False, str(ex))
     try:
-        ff = fetch_forexfactory()
+        ff, ffage = fetch_forexfactory()
         check("ForexFactory zdroj zije", len(ff) > 0, f"{len(ff)} eventu")
+        check("FF data nejsou prilis stara", ffage <= FF_MAX_STALE_SEC,
+              f"{ffage / 3600:.1f}h")
     except Exception as ex:
         check("ForexFactory zdroj zije (nebo cache)", False, str(ex)[:120])
+    try:
+        ev, src = get_events()
+        check("get_events vrati data + zdroj", len(ev) > 0 and bool(src), f"{len(ev)} / {src}")
+    except Exception as ex:
+        check("get_events vrati data + zdroj", False, str(ex)[:120])
 
     # 10 webhook nastaven
     check("webhook je nakonfigurovan", bool(webhook_url()))

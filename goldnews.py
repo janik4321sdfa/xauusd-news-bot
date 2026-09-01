@@ -263,9 +263,22 @@ def fetch_tradingview(days_back=1, days_fwd=2):
     return out
 
 
-def get_events():
+def _remember(ev, src):
+    _MEMO["at"] = time.time()
+    _MEMO["val"] = (ev, src)
+    return ev, src
+
+
+_MEMO = {"at": 0.0, "val": None}
+MEMO_TTL = 240      # v --loop rezimu nedotazuj zdroje pri kazdem pruchodu
+
+
+def get_events(use_memo=False):
     """FF primarne. Kdyz je FF cache prilis stara (nebo FF uplne padne),
     prepne se na TradingView. Nikdy neposila tyden stara data jako aktualni."""
+    if use_memo and _MEMO["val"] and (time.time() - _MEMO["at"]) < MEMO_TTL:
+        return _MEMO["val"]
+
     ff, age = None, None
     try:
         ff, age = fetch_forexfactory()
@@ -273,7 +286,7 @@ def get_events():
         log(f"FF: NEDOSTUPNE ({type(ex).__name__}: {ex})")
 
     if ff and age is not None and age <= FF_MAX_STALE_SEC:
-        return ff, "ForexFactory"
+        return _remember(ff, "ForexFactory")
 
     if ff:
         log(f"FF: cache je {age / 3600:.1f}h stara (limit {FF_MAX_STALE_SEC / 3600:.0f}h)"
@@ -281,13 +294,13 @@ def get_events():
     try:
         tv = fetch_tradingview()
         if tv:
-            return tv, "TradingView (zaloha)"
+            return _remember(tv, "TradingView (zaloha)")
     except Exception as ex:
         log(f"TV: NEDOSTUPNE ({type(ex).__name__}: {ex})")
 
     if ff:
         log("Oba zdroje problematicke -> pouzivam starou FF cache")
-        return ff, f"ForexFactory (cache {age / 3600:.0f}h)"
+        return _remember(ff, f"ForexFactory (cache {age / 3600:.0f}h)")
 
     raise RuntimeError("zadny zdroj dat neni dostupny")
 
@@ -455,6 +468,38 @@ def build_ping_embed(evs, minutes, source):
 
 
 # ----------------------------------------------------------------------------
+# Ulozeni stavu do gitu (jen v CI, kdyz GOLDNEWS_GIT_SYNC=1).
+# Diky tomu se pri restartu jobu neposle uz odeslany ping znovu.
+# ----------------------------------------------------------------------------
+def git_sync(msg="chore: state update [skip ci]"):
+    if os.environ.get("GOLDNEWS_GIT_SYNC") != "1":
+        return
+    import subprocess
+    try:
+        d = os.path.dirname(STATE_PATH) or "."
+        chk = subprocess.run(["git", "status", "--porcelain",
+                              "state.json", "ff_cache.json"],
+                             cwd=d, capture_output=True, text=True, timeout=60)
+        if not (chk.stdout or "").strip():
+            return
+        for cmd in (["git", "add", "state.json", "ff_cache.json"],
+                    ["git", "commit", "-m", msg]):
+            subprocess.run(cmd, cwd=d, capture_output=True, text=True, timeout=60)
+        for _ in range(3):
+            subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", "main"],
+                           cwd=d, capture_output=True, text=True, timeout=120)
+            pr = subprocess.run(["git", "push", "origin", "HEAD:main"],
+                                cwd=d, capture_output=True, text=True, timeout=120)
+            if pr.returncode == 0:
+                log("stav ulozen do gitu")
+                return
+            time.sleep(4)
+        log("stav se nepodarilo ulozit do gitu")
+    except Exception as ex:
+        log(f"git_sync chyba: {type(ex).__name__}: {ex}")
+
+
+# ----------------------------------------------------------------------------
 # Akce
 # ----------------------------------------------------------------------------
 def do_digest(dry=False, force=False):
@@ -474,9 +519,9 @@ def do_digest(dry=False, force=False):
     return ok
 
 
-def do_watch(dry=False, allow_sleep=True):
+def do_watch(dry=False, allow_sleep=True, use_memo=False):
     """Jeden hlidaci pruchod: denni souhrn (je-li cas) + pingy 5 min predem."""
-    events, source = get_events()
+    events, source = get_events(use_memo=use_memo)
     rel = gold_relevant(events)
     st = load_state()
     now = dt.datetime.now(LOCAL_TZ)
@@ -529,10 +574,31 @@ def do_watch(dry=False, allow_sleep=True):
     if changed and not dry:
         st["pinged"] = sorted(pinged)
         save_state(st)
+        git_sync()
     # signal pro CI, zda se ma stav commitnout
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"state_changed={'true' if changed else 'false'}\n")
+    return True
+
+
+def do_loop(minutes=330, interval=45, dry=False):
+    """Dlouhobezici hlidac. Nezavisly na presnosti cronu - kontroluje kazdych
+    `interval` sekund, takze ping odejde presne na T-5min."""
+    end = time.time() + minutes * 60.0
+    log(f"LOOP start: bezi {minutes} min, kontrola kazdych {interval}s")
+    n = 0
+    while time.time() < end:
+        n += 1
+        try:
+            do_watch(dry=dry, allow_sleep=True, use_memo=True)
+        except Exception as ex:
+            log(f"LOOP pruchod {n} chyba: {type(ex).__name__}: {ex}")
+        left = end - time.time()
+        if left <= 0:
+            break
+        time.sleep(max(1.0, min(interval, left)))
+    log(f"LOOP konec po {n} pruchodech")
     return True
 
 
@@ -680,6 +746,23 @@ def do_selftest():
     except Exception as ex:
         check("get_events vrati data + zdroj", False, str(ex)[:120])
 
+    # 9b memo cache
+    _MEMO["at"] = 0.0
+    _MEMO["val"] = None
+    e1 = get_events(use_memo=True)
+    t0 = time.time()
+    e2 = get_events(use_memo=True)
+    check("memo cache funguje (2. dotaz je okamzity)", (time.time() - t0) < 0.25)
+    check("memo vraci stejna data", e1[1] == e2[1])
+
+    # 9c do_loop existuje a ma spravnou signaturu
+    import inspect
+    check("do_loop existuje", callable(do_loop))
+    check("do_loop ma parametry minutes/interval",
+          {"minutes", "interval"} <= set(inspect.signature(do_loop).parameters))
+    check("git_sync je bez GOLDNEWS_GIT_SYNC no-op",
+          (os.environ.get("GOLDNEWS_GIT_SYNC") != "1") and (git_sync() is None))
+
     # 10 webhook nastaven
     check("webhook je nakonfigurovan", bool(webhook_url()))
 
@@ -695,6 +778,9 @@ def main():
     g.add_argument("--watch", action="store_true")
     g.add_argument("--now", action="store_true")
     g.add_argument("--selftest", action="store_true")
+    g.add_argument("--loop", action="store_true")
+    ap.add_argument("--minutes", type=int, default=330)
+    ap.add_argument("--interval", type=int, default=45)
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--no-sleep", action="store_true")
@@ -706,6 +792,8 @@ def main():
         return 0 if do_digest(dry=a.dry, force=a.force) else 1
     if a.watch:
         return 0 if do_watch(dry=a.dry, allow_sleep=not a.no_sleep) else 1
+    if a.loop:
+        return 0 if do_loop(minutes=a.minutes, interval=a.interval, dry=a.dry) else 1
     if a.now:
         return 0 if do_now(dry=a.dry) else 1
     return 2

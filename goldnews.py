@@ -389,22 +389,25 @@ def discord_send(embed, dry=False, content=None):
 # ----------------------------------------------------------------------------
 # Dopad na ZLATO
 #
-# Zaklad: zlato se kotuje v dolarech a konkuruje urokovym vynosum.
-#   silna US data  -> silnejsi dolar / vyssi vynosy -> ZLATO DOLU
-#   slaba US data  -> slabsi dolar  / nizsi vynosy  -> ZLATO NAHORU
+# Zlato se kotuje v dolarech a konkuruje urokovym vynosum:
+#   silna US data -> silnejsi dolar -> ZLATO PADA
+#   slaba US data -> slabsi dolar   -> ZLATO ROSTE
 #
-# Vetsina ukazatelu je "INV" = cim vyssi cislo, tim silnejsi ekonomika,
-# tim horsi pro zlato. Vyjimky ("DIR") jsou ukazatele slabosti trhu prace -
-# u nich vyssi cislo znamena SLABSI ekonomiku, tedy zlato nahoru.
+# "INV" = cim vyssi cislo, tim silnejsi ekonomika (vetsina ukazatelu).
+# "DIR" = cim vyssi cislo, tim SLABSI ekonomika (nezamestnanost, zadosti).
+#
+# POZOR na navrh zprav: pred vydanim se smer NEDA predpovedet. Trh reaguje na
+# odchylku skutecneho cisla od PROGNOZY. Proto se uzivateli ukazuje vyhradne
+# reakcni pravidlo (od jakeho cisla se to lame), nikoliv dohad o smeru.
 # ----------------------------------------------------------------------------
 
-# vyssi cislo = SLABSI ekonomika = zlato nahoru
+# vyssi cislo = SLABSI ekonomika = zlato roste
 GOLD_DIRECT = (
     "unemployment rate", "unemployment claims", "jobless claims",
     "initial claims", "continuing claims", "challenger job cuts",
 )
 
-# vyssi cislo = SILNEJSI ekonomika / vyssi inflace = zlato dolu
+# vyssi cislo = SILNEJSI ekonomika / vyssi inflace = zlato pada
 GOLD_INVERSE = (
     "non-farm", "nonfarm", "payroll", "employment change",
     "average hourly earnings", "employment cost", "jolts", "job openings",
@@ -444,7 +447,7 @@ def parse_value(txt):
 def gold_polarity(title):
     """'DIR' | 'INV' | None (nelze urcit)"""
     t = (title or "").lower()
-    for k in GOLD_DIRECT:        # specificke -> kontrolovat prvni
+    for k in GOLD_DIRECT:
         if k in t:
             return "DIR"
     for k in GOLD_INVERSE:
@@ -457,192 +460,169 @@ UP, DOWN, FLAT, UNK = "\U0001F4C8", "\U0001F4C9", "\u2796", "\u2754"
 
 
 def gold_view(e):
-    """Vraci {emoji, label, detail, rule, short} - dopad na zlato."""
+    """Vraci co se ma zobrazit u jedne zpravy.
+
+    kind   : 'RULE' | 'NOFORECAST' | 'UNKNOWN'
+    numbers: radek s cisly (nebo "")
+    rule   : seznam radku reakcniho pravidla
+    bias   : UP/DOWN/FLAT/None - JEN pro interni pouziti a testy,
+             uzivateli se nezobrazuje (byl to zdroj nedorozumeni)
+    """
     pol = gold_polarity(e.get("title"))
     fc = (e.get("forecast") or "").strip()
     pv = (e.get("previous") or "").strip()
     f, p = parse_value(fc), parse_value(pv)
 
-    # 1) neumime zaradit (reci centralnich bankeru, jednani, aukce...)
-    if pol is None:
-        bits = [f"prognoza `{fc}`" if fc else "**prognoza chybi**"]
-        if pv:
-            bits.append(f"minule `{pv}`")
-        return {"emoji": UNK, "label": "SMER NEJASNY",
-                "detail": " \u00b7 " + " \u00b7 ".join(bits),
-                "rule": "tato udalost nema jednoznacny dopad na zlato",
-                "short": f"{UNK} nejasne"}
-
-    # reakcni pravidlo - to je pri obchodovani to nejdulezitejsi
+    nums = []
     if fc:
-        if pol == "INV":
-            rule = f"vyjde-li NAD `{fc}` \u2192 {DOWN} dolu \u00b7 POD `{fc}` \u2192 {UP} nahoru"
-        else:
-            rule = f"vyjde-li NAD `{fc}` \u2192 {UP} nahoru \u00b7 POD `{fc}` \u2192 {DOWN} dolu"
-    else:
-        rule = None
+        nums.append(f"\u010dek\u00e1 se **{fc}**")
+    if pv:
+        nums.append(f"minule {pv}")
+    numbers = "  \u00b7  ".join(nums)
 
-    # 2) chybi prognoza
+    # interni bias (prognoza vs minule) - pouze pro testy
+    bias = None
+    if pol and f is not None and p is not None:
+        if f == p:
+            bias = FLAT
+        else:
+            bias = DOWN if ((f > p) if pol == "INV" else (f < p)) else UP
+
+    # udalost bez jednoznacneho dopadu (reci bankeru, jednani, aukce)
+    if pol is None:
+        msg = (f"{UNK} dopad na zlato nejasn\u00fd" if fc else
+               f"{UNK} **bez progn\u00f3zy** \u2014 dopad na zlato nejasn\u00fd")
+        return {"kind": "UNKNOWN", "numbers": numbers, "bias": None,
+                "rule": [msg], "short": f"{UNK}"}
+
+    # chybi prognoza -> neni od ceho merit odchylku
     if f is None:
-        if p is not None:
-            if pol == "INV":
-                r = f"silnejsi nez `{pv}` \u2192 {DOWN} dolu \u00b7 slabsi \u2192 {UP} nahoru"
-            else:
-                r = f"vyssi nez `{pv}` \u2192 {UP} nahoru \u00b7 nizsi \u2192 {DOWN} dolu"
-            det = f" \u00b7 **prognoza chybi**, minule `{pv}`"
-        else:
-            r = "smer nelze urcit dopredu"
-            det = " \u00b7 **prognoza ani predchozi hodnota nejsou**"
-        return {"emoji": UNK, "label": "BEZ PROGNOZY", "detail": det,
-                "rule": r, "short": f"{UNK} bez prognozy"}
+        return {"kind": "NOFORECAST", "numbers": numbers, "bias": None,
+                "rule": [f"{UNK} **bez progn\u00f3zy** \u2014 sm\u011br se p\u0159edem "
+                         f"ur\u010dit ned\u00e1"],
+                "short": f"{UNK}"}
 
-    # 3) mame prognozu, ale ne predchozi
-    if p is None:
-        return {"emoji": FLAT, "label": "SMER NEUTRALNI",
-                "detail": f" \u00b7 prognoza `{fc}` (predchozi hodnota chybi)",
-                "rule": rule, "short": f"{FLAT} neutralne"}
+    if pol == "INV":
+        up_side, down_side = "pod", "nad"
+    else:
+        up_side, down_side = "nad", "pod"
 
-    # 4) prognoza i predchozi -> ocekavany smer
-    if f == p:
-        return {"emoji": FLAT, "label": "BEZ ZMENY",
-                "detail": f" \u00b7 prognoza `{fc}` = minule `{pv}`",
-                "rule": rule, "short": f"{FLAT} bez zmeny"}
-
-    gold_down = (f > p) if pol == "INV" else (f < p)
-    if gold_down:
-        return {"emoji": DOWN, "label": "CEKA SE ZLATO DOLU",
-                "detail": f" \u00b7 prognoza `{fc}` vs minule `{pv}` "
-                          f"(ocekava se silnejsi ekonomika)",
-                "rule": rule, "short": f"{DOWN} dolu"}
-    return {"emoji": UP, "label": "CEKA SE ZLATO NAHORU",
-            "detail": f" \u00b7 prognoza `{fc}` vs minule `{pv}` "
-                      f"(ocekava se slabsi ekonomika)",
-            "rule": rule, "short": f"{UP} nahoru"}
+    return {
+        "kind": "RULE", "numbers": numbers, "bias": bias,
+        "rule": [f"{UP} {up_side} **{fc}** \u2192 zlato ROSTE",
+                 f"{DOWN} {down_side} **{fc}** \u2192 zlato PAD\u00c1"],
+        "short": f"{UP}{DOWN} {fc}",
+    }
 
 
-LEGEND = (f"{UP} ceka se zlato nahoru \u00b7 {DOWN} dolu \u00b7 "
-          f"{FLAT} neutralne \u00b7 {UNK} nelze urcit\n"
-          "Logika: silna US data \u2192 silnejsi dolar \u2192 zlato dolu. "
-          "Slaba data \u2192 zlato nahoru.\n"
-          "\u26a0\ufe0f Sipka je odhad z prognozy, ne predpoved. Trh reaguje na to, "
-          "jak moc se skutecne cislo odchyli od prognozy - proto je pod kazdou "
-          "zpravou i reakcni pravidlo.")
-
-
-def fmt_event(e):
-    """Plny zapis: cas + nazev, smer pro zlato, reakcni pravidlo."""
-    t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
+def _card(e, show_time=True):
+    """(nazev, hodnota) pro jednu zpravu jako Discord field."""
+    icon = IMPACT_ICON.get(e["impact"], "")
     v = gold_view(e)
-    out = [f"**{t}**  \u00b7  {e['title']}",
-           f"{v['emoji']} **{v['label']}**{v['detail']}"]
-    if v["rule"]:
-        out.append(f"\u21b3 {v['rule']}")
-    return "\n".join(out)
+    body = ([v["numbers"]] if v["numbers"] else []) + v["rule"]
+    if show_time:
+        t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
+        name = f"{icon}  {t}  \u00b7  {e['title']}"
+    else:
+        name = f"{icon}  {e['title']}"
+    return name, "\n".join(body)
 
 
 def fmt_event_compact(e):
     t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
+    icon = IMPACT_ICON.get(e["impact"], "")
     v = gold_view(e)
-    return f"**{t}** {e['title']} \u2014 {v['short']}"
+    tail = f"  \u2014  {v['numbers']}" if v["numbers"] else ""
+    return f"{icon} **{t}**  {e['title']}{tail}"
 
 
-fmt_line = fmt_event_compact          # zpetna kompatibilita
+fmt_event = fmt_event_compact
+fmt_line = fmt_event_compact
+
+HINT = ("\u0160ipky plat\u00ed proti **progn\u00f3ze**, ne proti minul\u00e9 hodnot\u011b. "
+        "Trh reaguje na odchylku od progn\u00f3zy.")
+
+
+def _sorted_evs(evs):
+    return sorted(evs, key=lambda x: (x["when"], x["impact"] != "High", x["title"]))
 
 
 def build_digest_embed(day, evs, source):
     ds = day.strftime("%d.%m.%Y")
     if not evs:
         return {
-            "title": f"XAUUSD \u2014 {ds}: zadne High/Medium zpravy",
-            "description": ("Dnes nejsou naplanovane zadne High ani Medium impact "
-                            "USD zpravy. Klidny den pro zlato."),
+            "author": {"name": "XAUUSD \u00b7 GOLD"},
+            "title": f"\u2705 {ds} \u2014 \u017e\u00e1dn\u00e9 v\u00fdznamn\u00e9 zpr\u00e1vy",
+            "description": "Dnes nevych\u00e1z\u00ed \u017e\u00e1dn\u00e1 High ani Medium "
+                           "zpr\u00e1va pro dolar. Klidn\u00fd den pro zlato.",
             "color": COLOR_CALM,
             "footer": {"text": foot(source)},
         }
-    highs = [e for e in evs if e["impact"] == "High"]
-    meds = [e for e in evs if e["impact"] == "Medium"]
 
-    def block(icon, name, group, full):
-        head = f"{icon} __**{name}**__"
-        sep = "\n\n" if full else "\n"
-        body = sep.join((fmt_event if full else fmt_event_compact)(e) for e in group)
-        return head + "\n" + body
+    evs = _sorted_evs(evs)
+    nh = sum(1 for e in evs if e["impact"] == "High")
+    nm = len(evs) - nh
+    head = []
+    if nh:
+        head.append(f"{IMPACT_ICON['High']} **{nh}\u00d7 High**")
+    if nm:
+        head.append(f"{IMPACT_ICON['Medium']} **{nm}\u00d7 Medium**")
 
-    for full in (True, False):        # pri mnoha zpravach zhustit
-        parts = []
-        if highs:
-            parts.append(block(IMPACT_ICON["High"], "HIGH IMPACT", highs, full))
-        if meds:
-            parts.append(block(IMPACT_ICON["Medium"], "MEDIUM IMPACT", meds, full))
-        desc = "\n\n".join(parts)
-        if len(desc) <= 3500:
-            break
-
-    return {
-        "title": f"XAUUSD / GOLD \u2014 zpravy na {ds}",
-        "description": desc,
-        "color": COLOR_HIGH if highs else COLOR_MED,
-        "fields": [
-            {"name": "Souhrn",
-             "value": f"High: **{len(highs)}**   \u00b7   Medium: **{len(meds)}**"
-                      f"   \u00b7   celkem **{len(evs)}**"},
-            {"name": "Legenda", "value": LEGEND},
-        ],
-        "footer": {"text": foot(source) + " \u00b7 casy Europe/Prague"},
+    emb = {
+        "author": {"name": "XAUUSD \u00b7 GOLD"},
+        "title": f"\U0001F4C5 Dne\u0161n\u00ed zpr\u00e1vy \u2014 {ds}",
+        "description": "     ".join(head),
+        "color": COLOR_HIGH if nh else COLOR_MED,
+        "timestamp": dt.datetime.now(UTC).isoformat(),
+        "footer": {"text": foot(source) + " \u00b7 \u010dasy Praha"},
     }
+
+    if len(evs) <= 20:
+        fields = []
+        for e in evs:
+            n, v = _card(e)
+            fields.append({"name": n, "value": v, "inline": False})
+        fields.append({"name": "\u2139\ufe0f", "value": HINT, "inline": False})
+        emb["fields"] = fields
+    else:
+        emb["description"] += "\n\n" + "\n".join(fmt_event_compact(e) for e in evs)
+        emb["fields"] = [{"name": "\u2139\ufe0f", "value": HINT}]
+    return emb
 
 
 def build_ping_embed(evs, minutes, source):
-    """evs = seznam eventu se STEJNYM casem -> jedna zprava misto nekolika."""
+    """evs = zpravy se STEJNYM casem -> jedna zprava misto nekolika."""
     if not isinstance(evs, list):
         evs = [evs]
-    evs = sorted(evs, key=lambda x: (x["impact"] != "High", x["title"]))
+    evs = _sorted_evs(evs)
     when = evs[0]["when"]
     t = when.astimezone(LOCAL_TZ).strftime("%H:%M")
     has_high = any(e["impact"] == "High" for e in evs)
     icon = IMPACT_ICON["High"] if has_high else IMPACT_ICON["Medium"]
     m = max(0, int(round(minutes)))
 
+    emb = {
+        "author": {"name": f"XAUUSD \u00b7 za {m} min"},
+        "color": COLOR_HIGH if has_high else COLOR_MED,
+        "timestamp": when.isoformat(),
+        "footer": {"text": foot(source)},
+    }
+
     if len(evs) == 1:
         e = evs[0]
         v = gold_view(e)
-        title = f"{icon} ZA {m} MIN \u2014 {e['title']}"
-        lines = [f"**{e['impact']} impact** \u00b7 `{e['currency']}` \u00b7 "
-                 f"vychazi v **{t}** (Praha)",
-                 "",
-                 f"{v['emoji']} **{v['label']}**{v['detail']}"]
-        if v["rule"]:
-            lines.append(f"\u21b3 {v['rule']}")
-        desc = "\n".join(lines)
-        fields = []
-        if e.get("forecast"):
-            fields.append({"name": "Prognoza", "value": e["forecast"], "inline": True})
-        if e.get("previous"):
-            fields.append({"name": "Predchozi", "value": e["previous"], "inline": True})
+        emb["title"] = f"{icon}  {e['title']}"
+        lines = [f"**{e['impact']}**  \u00b7  vych\u00e1z\u00ed v **{t}**", ""]
+        if v["numbers"]:
+            lines.append(v["numbers"])
+        lines += v["rule"]
+        emb["description"] = "\n".join(lines)
     else:
-        title = f"{icon} ZA {m} MIN \u2014 {len(evs)} zpravy v {t}"
-        blocks = []
-        for e in evs:
-            v = gold_view(e)
-            b = [f"{IMPACT_ICON.get(e['impact'], '')} **{e['impact']}** \u00b7 {e['title']}",
-                 f"{v['emoji']} **{v['label']}**{v['detail']}"]
-            if v["rule"]:
-                b.append(f"\u21b3 {v['rule']}")
-            blocks.append("\n".join(b))
-        desc = (f"Vsechny vychazi v **{t}** (Praha).\n\n" + "\n\n".join(blocks))
-        if len(desc) > 3500:
-            desc = (f"Vsechny vychazi v **{t}** (Praha).\n\n"
-                    + "\n".join(fmt_event_compact(e) for e in evs))
-        fields = []
-
-    fields.append({"name": "Legenda", "value": LEGEND})
-    return {
-        "title": title,
-        "description": desc,
-        "color": COLOR_HIGH if has_high else COLOR_MED,
-        "fields": fields,
-        "footer": {"text": foot(source)},
-    }
+        emb["title"] = f"{icon}  {len(evs)} zpr\u00e1vy v {t}"
+        emb["description"] = f"V\u0161echny vych\u00e1zej\u00ed v **{t}**."
+        emb["fields"] = [{"name": n, "value": v, "inline": False}
+                         for n, v in (_card(e, show_time=False) for e in evs)]
+    return emb
 
 
 # ----------------------------------------------------------------------------
@@ -796,7 +776,7 @@ def do_now(dry=False):
         mins = (nxt["when"] - dt.datetime.now(UTC)).total_seconds() / 60.0
         emb.setdefault("fields", []).append({
             "name": "Nejblizsi zprava",
-            "value": f"{fmt_event(nxt)}\n\n\u2192 za **{int(mins)} min**",
+            "value": f"{fmt_event_compact(nxt)}\n\u2192 za **{int(mins)} min**",
         })
     ok = discord_send(emb, dry=dry)
     print("\n" + "=" * 62)
@@ -804,13 +784,19 @@ def do_now(dry=False):
     print("=" * 62)
     if not evs:
         print("  Zadne High ani Medium impact USD zpravy dnes.")
-    _lbl = {UP: "ZLATO NAHORU", DOWN: "ZLATO DOLU",
-            FLAT: "neutralne", UNK: "nelze urcit"}
     for e in evs:
         t = e["when"].astimezone(LOCAL_TZ).strftime("%H:%M")
         v = gold_view(e)
-        print(f"  {t}  {e['impact']:<6} {e['title'][:38]:<38} "
-              f"-> {_lbl.get(v['emoji'], '?')}")
+        fc = (e.get("forecast") or "").strip()
+        if v["kind"] == "RULE":
+            pol = gold_polarity(e["title"])
+            hint = (f"pod {fc} = roste / nad {fc} = pada" if pol == "INV"
+                    else f"nad {fc} = roste / pod {fc} = pada")
+        elif v["kind"] == "NOFORECAST":
+            hint = "bez prognozy"
+        else:
+            hint = "dopad nejasny"
+        print(f"  {t}  {e['impact']:<6} {e['title'][:34]:<34}  {hint}")
     print("=" * 62)
     print("  Odeslano na Discord: " + ("ANO" if ok else "NE - chyba"))
     print("=" * 62 + "\n")
@@ -874,24 +860,37 @@ def do_selftest():
         got = 0.0 < mins <= PING_WINDOW_MIN
         check(f"okno {m:+d} min -> {'ping' if want else 'nic'}", got == want)
 
+    def _alltext(emb):
+        """Vsechen text z embedu - testy tak neresi, jestli je to v description
+        nebo ve fields."""
+        parts = [emb.get("title", ""), emb.get("description", "") or "",
+                 (emb.get("author") or {}).get("name", ""),
+                 (emb.get("footer") or {}).get("text", "")]
+        for f in emb.get("fields", []):
+            parts += [f.get("name", ""), f.get("value", "")]
+        return "\n".join(parts)
+
     # 7 embed rendering
     ev = {"id": "z", "title": "ISM Manufacturing PMI", "currency": "USD",
-          "impact": "High", "when": now_u + dt.timedelta(minutes=5),
+          "impact": "High", "when": dt.datetime.now(UTC) + dt.timedelta(minutes=5),
           "forecast": "48.5", "previous": "48.0", "source": "T"}
     de = build_digest_embed(dt.date(2026, 9, 1), [ev], "T")
     pe = build_ping_embed(ev, 5, "T")
-    check("digest embed ma titulek + popis", bool(de["title"]) and bool(de["description"]))
-    check("digest obsahuje nazev eventu", "ISM Manufacturing PMI" in de["description"])
-    check("ping embed obsahuje 'ZA 5 MIN'", "ZA 5 MIN" in pe["title"], pe["title"])
+    check("digest ma titulek", bool(de["title"]))
+    check("digest obsahuje nazev zpravy", "ISM Manufacturing PMI" in _alltext(de))
+    check("digest ma autora", bool((de.get("author") or {}).get("name")))
+    check("ping ma nazev zpravy v titulku", "ISM Manufacturing PMI" in pe["title"])
+    check("ping ma 'za 5 min' v autorovi", "za 5 min" in _alltext(pe), _alltext(pe)[:60])
+
     ev2 = dict(ev, id="z2", title="JOLTS Job Openings", impact="Medium")
     pg = build_ping_embed([ev, ev2], 5, "T")
-    check("skupinovy ping = 1 zprava pro 2 eventy", "2 zpravy" in pg["title"], pg["title"])
+    check("skupinovy ping = 1 zprava pro 2 zpravy", "2 zpr" in pg["title"], pg["title"])
+    txt = _alltext(pg)
     check("skupinovy ping obsahuje oba nazvy",
-          "ISM Manufacturing PMI" in pg["description"] and "JOLTS" in pg["description"])
-    check("skupinovy ping ma barvu High (je tam High)", pg["color"] == COLOR_HIGH)
-    check("jednotlivy ping ma nazev eventu v titulku",
-          "ISM Manufacturing PMI" in pe["title"])
-    check("prazdny digest je zeleny", build_digest_embed(dt.date(2026, 9, 1), [], "T")["color"] == COLOR_CALM)
+          "ISM Manufacturing PMI" in txt and "JOLTS" in txt)
+    check("skupinovy ping ma barvu High", pg["color"] == COLOR_HIGH)
+    check("prazdny digest je zeleny",
+          build_digest_embed(dt.date(2026, 9, 1), [], "T")["color"] == COLOR_CALM)
     check("embed <= 6000 znaku", len(json.dumps(de)) < 6000)
 
     # 8 stav round-trip
@@ -954,14 +953,14 @@ def do_selftest():
         check("emoji lze vypsat (UTF-8 vynuceno)", False, str(ex))
 
     # 9e parsovani cisel
-    for txt, want in (("55.2", 55.2), ("-0.7%", -0.7), ("165K", 165000.0),
-                      ("7.33M", 7330000.0), ("1.2B", 1.2e9), ("3,500", 3500.0),
-                      ("0.0%", 0.0), ("", None), ("N/A", None), ("<0.1%", 0.1)):
-        got = parse_value(txt)
-        check(f"parse_value({txt!r}) = {want}", got == want, str(got))
+    for txt_, want in (("55.2", 55.2), ("-0.7%", -0.7), ("165K", 165000.0),
+                       ("7.33M", 7330000.0), ("1.2B", 1.2e9), ("3,500", 3500.0),
+                       ("0.0%", 0.0), ("", None), ("N/A", None), ("<0.1%", 0.1)):
+        got = parse_value(txt_)
+        check(f"parse_value({txt_!r}) = {want}", got == want, str(got))
 
-    # 9f zarazeni ukazatelu
-    pol_cases = [
+    # 9f zarazeni ukazatelu (INV = vyssi cislo znamena silnejsi ekonomiku)
+    for title, want in [
         ("ISM Manufacturing PMI", "INV"),
         ("Non-Farm Employment Change", "INV"),
         ("ADP Non-Farm Employment Change", "INV"),
@@ -975,88 +974,104 @@ def do_selftest():
         ("Fed Barr Speech", None),
         ("G20 Meetings", None),
         ("52-Week Bill Auction", None),
-    ]
-    for title, want in pol_cases:
-        got = gold_polarity(title)
-        check(f"polarita '{title}' = {want}", got == want, str(got))
+    ]:
+        check(f"polarita '{title}' = {want}", gold_polarity(title) == want,
+              str(gold_polarity(title)))
 
-    def _ev(title, fc, pv):
-        return {"id": "x", "title": title, "currency": "USD", "impact": "High",
+    def _ev(title, fc, pv, imp="High"):
+        return {"id": "x", "title": title, "currency": "USD", "impact": imp,
                 "when": dt.datetime.now(UTC) + dt.timedelta(minutes=30),
                 "forecast": fc, "previous": pv, "source": "T"}
 
-    # 9g smer pro zlato - jadro logiky
-    dir_cases = [
-        # (nazev, prognoza, minule, ocekavane emoji, popis)
-        ("ISM Manufacturing PMI", "55.2", "55.6", UP,
-         "slabsi PMI nez minule -> zlato nahoru"),
-        ("ISM Manufacturing PMI", "56.0", "55.6", DOWN,
-         "silnejsi PMI -> zlato dolu"),
-        ("Non-Farm Employment Change", "165K", "142K", DOWN,
-         "vic pracovnich mist -> zlato dolu"),
-        ("Non-Farm Employment Change", "120K", "142K", UP,
-         "mene pracovnich mist -> zlato nahoru"),
-        ("Core CPI m/m", "0.4%", "0.2%", DOWN,
-         "vyssi inflace -> hawkish Fed -> zlato dolu"),
-        ("Unemployment Rate", "4.5%", "4.2%", UP,
-         "vyssi nezamestnanost -> zlato nahoru"),
-        ("Unemployment Rate", "4.0%", "4.2%", DOWN,
-         "nizsi nezamestnanost -> zlato dolu"),
-        ("Unemployment Claims", "240K", "220K", UP,
-         "vic zadosti o podporu -> zlato nahoru"),
-        ("JOLTS Job Openings", "7.33M", "7.36M", UP,
-         "mene volnych mist -> zlato nahoru"),
-        ("ISM Manufacturing PMI", "55.6", "55.6", FLAT,
-         "stejne jako minule -> neutralne"),
-        ("ISM Manufacturing PMI", "", "55.6", UNK,
-         "chybi prognoza -> nelze urcit"),
-        ("ISM Manufacturing PMI", "55.2", "", FLAT,
-         "chybi predchozi -> neutralne"),
-        ("Fed Barr Speech", "", "", UNK,
-         "rec bankera -> smer nejasny"),
-    ]
-    for title, fc, pv, want, why in dir_cases:
-        v = gold_view(_ev(title, fc, pv))
-        check(f"{why}", v["emoji"] == want, f"dostal {v['label']}")
+    # 9g reakcni pravidlo - JEDINA vec, kterou uzivatel vidi.
+    #    INV: pod prognozu = zlato roste. DIR: nad prognozu = zlato roste.
+    inv = gold_view(_ev("ISM Manufacturing PMI", "55.2", "55.6"))
+    check("INV ma pravidlo o 2 radcich", len(inv["rule"]) == 2)
+    check("INV: 'pod' je na radku s ROSTE",
+          "pod" in inv["rule"][0] and "ROSTE" in inv["rule"][0], inv["rule"][0])
+    check("INV: 'nad' je na radku s PADA",
+          "nad" in inv["rule"][1] and "PAD" in inv["rule"][1], inv["rule"][1])
+    check("INV: pravidlo obsahuje prognozu", "55.2" in inv["rule"][0])
 
-    # 9h reakcni pravidlo musi byt u kazde zpravy s prognozou
-    v = gold_view(_ev("ISM Manufacturing PMI", "55.2", "55.6"))
-    check("reakcni pravidlo obsahuje prognozu", "55.2" in (v["rule"] or ""))
-    check("reakcni pravidlo INV: nad = dolu",
-          v["rule"].index("NAD") < v["rule"].index(DOWN))
-    v2 = gold_view(_ev("Unemployment Claims", "240K", "220K"))
-    check("reakcni pravidlo DIR: nad = nahoru",
-          v2["rule"].index("NAD") < v2["rule"].index(UP))
-    for t_, f_, p_ in (("Fed Barr Speech", "", ""),
+    dr = gold_view(_ev("Unemployment Claims", "240K", "220K"))
+    check("DIR: 'nad' je na radku s ROSTE",
+          "nad" in dr["rule"][0] and "ROSTE" in dr["rule"][0], dr["rule"][0])
+    check("DIR: 'pod' je na radku s PADA",
+          "pod" in dr["rule"][1] and "PAD" in dr["rule"][1], dr["rule"][1])
+
+    # 9h chybejici prognoza se VZDY rekne
+    for t_, f_, p_ in (("Fed Chair Powell Speaks", "", ""),
                        ("ISM Manufacturing PMI", "", "55.6"),
                        ("G20 Meetings", "", "")):
         vx = gold_view(_ev(t_, f_, p_))
-        txt = (vx["detail"] + " " + (vx["rule"] or "")).lower()
-        check(f"'{t_}' bez prognozy to rekne v textu",
-              "prognoza chybi" in txt or "prognoza ani predchozi" in txt, vx["detail"])
+        txt = " ".join(vx["rule"]).lower()
+        check(f"'{t_}' -> vyslovne rekne, ze prognoza chybi",
+              "bez progn" in txt, txt[:70])
+        check(f"'{t_}' -> zadne reakcni pravidlo (neni od ceho merit)",
+              "ROSTE" not in " ".join(vx["rule"]))
 
-    # 9i embed limity a obsah
-    many = [_ev(f"Indicator {i}", "1.0", "0.5") for i in range(14)]
-    for e in many:
-        e["impact"] = "Medium" if int(e["title"][-1] or 0) % 2 else "High"
-    big = build_digest_embed(dt.date(2026, 9, 1), many, "T")
-    check("digest se vejde do limitu i pri 14 zpravach",
-          len(big["description"]) <= 4096, f"{len(big['description'])} znaku")
-    check("cely embed pod 6000 znaku", len(json.dumps(big)) < 6000,
-          f"{len(json.dumps(big))}")
-    check("digest ma legendu",
-          any(f.get("name") == "Legenda" for f in big.get("fields", [])))
+    # 9i interni bias (uzivateli se NEZOBRAZUJE, ale logika musi byt spravna)
+    for title, fc, pv, want, why in [
+        ("ISM Manufacturing PMI", "55.2", "55.6", UP, "slabsi PMI = zlato nahoru"),
+        ("ISM Manufacturing PMI", "56.0", "55.6", DOWN, "silnejsi PMI = zlato dolu"),
+        ("Non-Farm Employment Change", "165K", "142K", DOWN, "vic mist = zlato dolu"),
+        ("Core CPI m/m", "0.4%", "0.2%", DOWN, "vyssi inflace = zlato dolu"),
+        ("Unemployment Rate", "4.5%", "4.2%", UP, "vyssi nezamestnanost = nahoru"),
+        ("Unemployment Claims", "240K", "220K", UP, "vic zadosti = nahoru"),
+        ("JOLTS Job Openings", "7.33M", "7.36M", UP, "mene volnych mist = nahoru"),
+        ("ISM Manufacturing PMI", "55.6", "55.6", FLAT, "stejne = neutralne"),
+    ]:
+        check(f"bias: {why}", gold_view(_ev(title, fc, pv))["bias"] == want,
+              str(gold_view(_ev(title, fc, pv))["bias"]))
 
-    d3 = build_digest_embed(dt.date(2026, 9, 1),
+    check("bias se uzivateli nezobrazuje (neni v textu embedu)",
+          "CEKA SE" not in _alltext(build_digest_embed(
+              dt.date(2026, 9, 1), [_ev("ISM Manufacturing PMI", "55.2", "55.6")], "T")))
+
+    # 9j vzhled a limity
+    one = build_digest_embed(dt.date(2026, 9, 1),
                             [_ev("ISM Manufacturing PMI", "55.2", "55.6")], "T")
-    check("digest obsahuje sipku zlata", UP in d3["description"] or DOWN in d3["description"])
-    check("digest obsahuje reakcni pravidlo", "NAD" in d3["description"])
+    t1 = _alltext(one)
+    check("digest ma kartu se casem a nazvem", "ISM Manufacturing PMI" in t1)
+    check("digest ma reakcni pravidlo", "ROSTE" in t1 and "PAD" in t1)
+    check("digest ma vysvetlivku o prognoze", "progn" in t1.lower())
+    check("digest ma pocty High/Medium", "High" in (one.get("description") or ""))
 
-    pg = build_ping_embed([_ev("ISM Manufacturing PMI", "55.2", "55.6"),
-                           _ev("JOLTS Job Openings", "7.33M", "7.36M")], 5, "T")
-    check("skupinovy ping ma smer u obou", pg["description"].count(UP) >= 2,
-          f"{pg['description'].count(UP)}x")
-    check("skupinovy ping pod limitem", len(json.dumps(pg)) < 6000)
+    many = [_ev(f"Indicator {i}", "1.0", "0.5",
+                "High" if i % 3 == 0 else "Medium") for i in range(15)]
+    big = build_digest_embed(dt.date(2026, 9, 1), many, "T")
+    check("15 zprav: pouzije karty", len(big.get("fields", [])) == 16,
+          str(len(big.get("fields", []))))
+    check("15 zprav: pod limitem 6000", len(json.dumps(big)) < 6000,
+          str(len(json.dumps(big))))
+    check("15 zprav: max 25 fieldu", len(big.get("fields", [])) <= 25)
+
+    huge = [_ev(f"Indicator {i}", "1.0", "0.5") for i in range(30)]
+    bigger = build_digest_embed(dt.date(2026, 9, 1), huge, "T")
+    check("30 zprav: prepne na kompaktni vypis",
+          len(bigger.get("fields", [])) <= 2)
+    check("30 zprav: description pod 4096",
+          len(bigger.get("description", "")) <= 4096,
+          str(len(bigger.get("description", ""))))
+    check("30 zprav: pod limitem 6000", len(json.dumps(bigger)) < 6000)
+
+    pg2 = build_ping_embed([_ev("ISM Manufacturing PMI", "55.2", "55.6"),
+                            _ev("JOLTS Job Openings", "7.33M", "7.36M", "Medium")],
+                           5, "T")
+    check("skupinovy ping ma kartu pro kazdou zpravu",
+          len(pg2.get("fields", [])) == 2)
+    check("skupinovy ping neopakuje cas u kazde karty",
+          all(":" not in f["name"].split("\u00b7")[0] for f in pg2["fields"]),
+          pg2["fields"][0]["name"])
+    check("skupinovy ping ma cas v hlavicce", ":" in pg2["description"])
+    check("skupinovy ping pod limitem", len(json.dumps(pg2)) < 6000)
+
+    solo = build_ping_embed([_ev("ISM Manufacturing PMI", "55.2", "55.6")], 5, "T")
+    check("jedna zprava: bez fieldu, vse v popisu", not solo.get("fields"))
+    check("jedna zprava: ma cisla i pravidlo",
+          "55.2" in solo["description"] and "ROSTE" in solo["description"])
+
+    check("diakritika prosla do textu", "\u010dek\u00e1 se" in t1, t1[:40])
 
     # 10 webhook nastaven
     check("webhook je nakonfigurovan", bool(webhook_url()))

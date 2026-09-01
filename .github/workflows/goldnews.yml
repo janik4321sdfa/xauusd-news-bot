@@ -26,9 +26,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          n=$(gh run list --workflow loop.yml --status in_progress \
-                --limit 20 --json databaseId --jq 'length' 2>/dev/null || echo 0)
-          echo "bezicich smycek: $n"
+          a=$(gh run list --workflow loop.yml   --status in_progress --limit 20 --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          b=$(gh run list --workflow loop_b.yml --status in_progress --limit 20 --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          n=$(( ${a:-0} + ${b:-0} ))
+          echo "bezicich smycek: $n (A=$a B=$b)"
           if [ "${n:-0}" -gt 0 ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
             echo "Smycka je ziva - zaloha se nespousti."

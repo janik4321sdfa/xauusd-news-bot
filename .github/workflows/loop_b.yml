@@ -1,15 +1,13 @@
-name: GoldNews Loop A
+name: GoldNews Loop B
 
 # Presny hlidac (kontrola kazdych 45 s). Bezi ~5h20m, pak preda rizeni
-# workflow "GoldNews Loop B" (pres udalost workflow_run). B po dobehnuti
-# nastartuje zpet A. Tim mame nekonecny beh BEZ zavislosti na cronu
+# workflow "GoldNews Loop A" (pres udalost workflow_run). A po dobehnuti
+# nastartuje zpet B. Tim mame nekonecny beh BEZ zavislosti na cronu
 # (cron u GitHubu byva zpozdeny nebo se pri zatezi preskoci).
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"      # jen dalsi pojistka, hlavni je retez A<->B
   workflow_run:
-    workflows: ["GoldNews Loop B"]
+    workflows: ["GoldNews Loop A"]
     types: [completed]
 
 permissions:
@@ -81,7 +79,7 @@ jobs:
         if: steps.guard.outputs.skip == 'false'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          GOLDNEWS_ORIGIN: cloud-A
+          GOLDNEWS_ORIGIN: cloud-B
           GOLDNEWS_GIT_SYNC: "1"
           TZ: Europe/Prague
         run: python -u goldnews.py --loop --minutes 320 --interval 45
@@ -102,7 +100,7 @@ jobs:
         if: always() && steps.guard.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: logs-A-${{ github.run_id }}
+          name: logs-B-${{ github.run_id }}
           path: logs/
           retention-days: 7
           if-no-files-found: ignore

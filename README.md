@@ -99,3 +99,32 @@ python preview.py                                       # jak zpravy vypadaji
 
 Obnoveni tokenu: lokalne `python set_self_token.py` (cte ho z Windows
 Credential Manageru).
+
+## Stav a další vývoj
+
+Infrastruktura (smyčka, restart, deduplikace, fallback zdrojů, časování) je
+hotová a v produkci ověřená. Prostor ke zlepšení není v Discordu ani ve smyčce —
+je v tom, jak bot **interpretuje** ekonomické zprávy a jak odhaduje reálný dopad
+na XAUUSD.
+
+| Oblast | Hodnocení |
+|---|---|
+| Spolehlivost loopu | 9 / 10 |
+| Ochrana proti duplicitám | 9 / 10 |
+| Fallback zdroje | 8,5 / 10 |
+| Discord UX | 9 / 10 |
+| Časování | 9,5 / 10 |
+| Ekonomická logika | 7 / 10 |
+| Predikce reakce zlata | 6,5 / 10 |
+| **Celkově** | **8,3 / 10** |
+
+Plán dalších kroků, včetně dvou ověřených technických zjištění, která mění
+způsob implementace, je v **[ROADMAP.md](ROADMAP.md)**:
+
+- **Forex Factory neposílá `actual`** — druhá fáze zprávy (Actual vs Forecast)
+  musí stát na TradingView, což vyžaduje párování eventů mezi zdroji.
+- **DXY (`DX-Y.NYB`) i US10Y (`^TNX`) jsou dostupné bez klíče** — reakce trhu po
+  zprávě je proveditelná, ale je nutné nejprve změřit latenci Yahoo.
+
+Vodicí princip: nedělat *víc alertů*, ale inteligentnější **economic-event
+engine**.

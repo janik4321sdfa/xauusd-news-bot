@@ -1,9 +1,16 @@
 name: GoldNews Loop B
 
-# Presny hlidac (kontrola kazdych 45 s). Bezi ~5h20m, pak preda rizeni
-# workflow "GoldNews Loop A" (pres udalost workflow_run). A po dobehnuti
-# nastartuje zpet B. Tim mame nekonecny beh BEZ zavislosti na cronu
-# (cron u GitHubu byva zpozdeny nebo se pri zatezi preskoci).
+# Presny hlidac zprav pro XAUUSD. Jeden beh ~5h20m, kontrola kazdych 45 s.
+#
+# Jak se to restartuje (3 nezavisle cesty, aby to nikdy neumrelo):
+#   1) PRIMARNI - posledni krok tohoto behu nastartuje "Loop A" pres SELF_TOKEN.
+#      Musi to byt PAT, ne GITHUB_TOKEN: udalosti vyvolane GITHUB_TOKENem
+#      GitHub zamerne nespousti (ochrana proti rekurzi).
+#   2) ZALOHA - workflow_run po dokonceni Loop A. Funguje, ale GitHub omezuje
+#      zanoreni workflow_run na ~3 urovne, takze na tom nelze stavet samo.
+#   3) ZALOHA - cron. U tohoto repa zatim nikdy nesepnul, je tu jen pro poradek.
+#
+# Dve smycky nesmi bezet zaraz -> viz krok "Guard".
 on:
   workflow_dispatch:
   workflow_run:
@@ -26,9 +33,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           skip=false
+          mine=${{ github.run_id }}
 
           # (1) Nezretezuj po behu, ktery sam nic nedelal (byl to "skip").
-          #     Bez teto pojistky by A a B po sobe strilely v nekonecne smycce.
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             s=$(date -u -d "${{ github.event.workflow_run.run_started_at }}" +%s 2>/dev/null || echo 0)
             e=$(date -u -d "${{ github.event.workflow_run.updated_at }}" +%s 2>/dev/null || echo 0)
@@ -40,17 +47,22 @@ jobs:
             fi
           fi
 
-          # (2) Nikdy nesmi bezet dve smycky zaraz.
+          # (2) Jen jedna smycka. Predchudce ale muze jeste dobihat (predava
+          #     rizeni), takze na nej chvili pockame - jinak by se nova smycka
+          #     zbytecne vypnula a hlidani by skoncilo.
           if [ "$skip" = "false" ]; then
-            mine=${{ github.run_id }}
-            ids=$( (gh run list --workflow loop.yml   --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'; \
-                    gh run list --workflow loop_b.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId') 2>/dev/null )
-            others=$(echo "$ids" | grep -v "^${mine}$" | grep -c '[0-9]' || true)
-            echo "jine bezici smycky: ${others:-0}"
-            if [ "${others:-0}" -gt 0 ]; then
-              echo "jina smycka uz bezi -> koncim"
-              skip=true
-            fi
+            for i in 1 2 3 4 5; do
+              ids=$( (gh run list --workflow loop.yml   --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'; \
+                      gh run list --workflow loop_b.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId') 2>/dev/null )
+              others=$(echo "$ids" | grep -v "^${mine}$" | grep -c '[0-9]' || true)
+              echo "pokus $i: jine bezici smycky = ${others:-0}"
+              if [ "${others:-0}" -eq 0 ]; then break; fi
+              if [ "$i" -eq 5 ]; then
+                echo "jina smycka stale bezi -> koncim"
+                skip=true
+              fi
+              sleep 25
+            done
           fi
 
           echo "skip=$skip" >> $GITHUB_OUTPUT
@@ -95,6 +107,28 @@ jobs:
               sleep 5
             done
           fi
+
+      # Tohle drzi bota nazivu. Bezi i pri zruseni/padu behu.
+      - name: Nastartuj navaznou smycku
+        if: always() && steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.SELF_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::SELF_TOKEN chybi - navazna smycka se NENASTARTUJE."
+            echo "Doplnit: spustit lokalne set_self_token.py"
+            exit 0
+          fi
+          for i in 1 2 3; do
+            if gh workflow run loop.yml --ref main; then
+              echo "navazna smycka (Loop A) nastartovana"
+              exit 0
+            fi
+            echo "pokus $i selhal, zkousim znovu"
+            sleep 5
+          done
+          echo "::error::navaznou smycku se nepodarilo nastartovat"
 
       - name: Upload logs
         if: always() && steps.guard.outputs.skip == 'false'
